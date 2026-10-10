@@ -1,0 +1,167 @@
+x-app-env: &app-env
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://opspulse:${POSTGRES_PASSWORD:-opspulse-local-db-password}@db:5432/opspulse}
+  JWT_SECRET: ${JWT_SECRET:-local-only-change-this-jwt-secret-before-deploying}
+  RABBITMQ_URL: amqp://${RABBITMQ_USER:-opspulse}:${RABBITMQ_PASSWORD:-opspulse-local-rabbit-password}@rabbitmq:5672/
+  REDIS_URL: redis://redis:6379/0
+  SMTP_HOST: ${SMTP_HOST:-mailpit}
+  SMTP_PORT: ${SMTP_PORT:-1025}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-opspulse@localhost}
+  SMTP_TLS: ${SMTP_TLS:-false}
+  APP_ENV: ${APP_ENV:-development}
+  ALLOW_SELF_REGISTRATION: ${ALLOW_SELF_REGISTRATION:-true}
+  AUTO_CREATE_SCHEMA: ${AUTO_CREATE_SCHEMA:-true}
+  MAX_ALERT_BODY_BYTES: ${MAX_ALERT_BODY_BYTES:-1048576}
+  INCIDENT_RETENTION_LIMIT: ${INCIDENT_RETENTION_LIMIT:-1000}
+  INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-only-internal-token-change-before-production}
+
+
+services:
+  frontend:
+    build: { context: ., dockerfile: frontend/Dockerfile }
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      gateway: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"], interval: 10s, timeout: 3s, retries: 10, start_period: 10s }
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: opspulse
+      POSTGRES_USER: opspulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-opspulse-local-db-password}
+    ports: ["127.0.0.1:5434:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opspulse -d opspulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit:v1.22
+    ports: ["127.0.0.1:8026:8025"]
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-opspulse}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-opspulse-local-rabbit-password}
+    ports: ["127.0.0.1:15672:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  identity:
+    build: { context: ., dockerfile: services/identity/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment: *app-env
+    depends_on: { db: { condition: service_healthy } }
+
+  organization:
+    build: { context: ., dockerfile: services/organization/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment: *app-env
+    depends_on: { db: { condition: service_healthy } }
+
+  incident:
+    build: { context: ., dockerfile: services/incident/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment: *app-env
+    depends_on: { db: { condition: service_healthy } }
+
+  alert-routing:
+    build: { context: ., dockerfile: services/alert-routing/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment:
+      <<: *app-env
+      INCIDENT_URL: http://incident:8000
+    depends_on:
+      db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      incident: { condition: service_healthy }
+
+  escalation:
+    build: { context: ., dockerfile: services/escalation/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment: *app-env
+    depends_on: { db: { condition: service_healthy } }
+
+  notification:
+    build: { context: ., dockerfile: services/notification/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment: *app-env
+    depends_on: { db: { condition: service_healthy } }
+
+  audit:
+    build: { context: ., dockerfile: services/audit/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment: *app-env
+    depends_on: { db: { condition: service_healthy } }
+
+  worker:
+    build: { context: ., dockerfile: services/worker/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment:
+      <<: *app-env
+      NOTIFICATION_URL: http://notification:8000
+    depends_on:
+      db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      notification: { condition: service_healthy }
+
+  gateway:
+    build: { context: ., dockerfile: gateway/Dockerfile }
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"], interval: 10s, timeout: 3s, retries: 10, start_period: 15s }
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://opspulse:${POSTGRES_PASSWORD:-opspulse-local-db-password}@db:5432/opspulse}
+      JWT_SECRET: ${JWT_SECRET:-local-only-change-this-jwt-secret-before-deploying}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-opspulse}:${RABBITMQ_PASSWORD:-opspulse-local-rabbit-password}@rabbitmq:5672/
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-only-internal-token-change-before-production}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-opspulse@localhost}
+      SMTP_TLS: ${SMTP_TLS:-false}
+      APP_ENV: ${APP_ENV:-development}
+      IDENTITY_URL: http://identity:8000
+      ORGANIZATION_URL: http://organization:8000
+      INCIDENT_URL: http://incident:8000
+      ALERT_ROUTING_URL: http://alert-routing:8000
+      ESCALATION_URL: http://escalation:8000
+      NOTIFICATION_URL: http://notification:8000
+      AUDIT_URL: http://audit:8000
+      WORKER_URL: http://worker:8000
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      identity: { condition: service_healthy }
+      organization: { condition: service_healthy }
+      incident: { condition: service_healthy }
+      alert-routing: { condition: service_healthy }
+      escalation: { condition: service_healthy }
+      notification: { condition: service_healthy }
+      audit: { condition: service_healthy }
+
+
+volumes:
+  postgres-data:
+  redis-data:
